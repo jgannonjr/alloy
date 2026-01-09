@@ -37,6 +37,9 @@ pub(crate) struct PubSubService<T> {
 
     /// The request manager.
     pub(crate) in_flights: RequestManager,
+
+    /// Consecutive backend errors (resets on successful message receipt).
+    pub(crate) consecutive_errors: u32,
 }
 
 impl<T: PubSubConnect> PubSubService<T> {
@@ -51,6 +54,7 @@ impl<T: PubSubConnect> PubSubService<T> {
             reqs,
             subs: SubscriptionManager::default(),
             in_flights: Default::default(),
+            consecutive_errors: 0,
         };
         this.spawn();
         Ok(PubSubFrontend::new(tx))
@@ -245,16 +249,44 @@ impl<T: PubSubConnect> PubSubService<T> {
 
                     item_opt = self.handle.from_socket.recv() => {
                         if let Some(item) = item_opt {
+                            // Reset consecutive errors on successful message receipt
+                            self.consecutive_errors = 0;
                             if let Err(e) = self.handle_item(item) {
                                 break Err(e)
                             }
-                        } else if let Err(e) = self.reconnect_with_retries().await {
-                            break Err(e)
+                        } else {
+                            // Channel closed - backend died
+                            self.consecutive_errors += 1;
+                            error!(
+                                consecutive_errors = self.consecutive_errors,
+                                "Backend channel closed, attempting reconnection"
+                            );
+                            if self.consecutive_errors >= self.handle.max_retries {
+                                error!(
+                                    "Too many consecutive backend failures ({}), shutting down",
+                                    self.consecutive_errors
+                                );
+                                break Err(TransportErrorKind::backend_gone())
+                            }
+                            if let Err(e) = self.reconnect_with_retries().await {
+                                break Err(e)
+                            }
                         }
                     }
 
                     _ = &mut self.handle.error => {
-                        error!("Pubsub service backend error.");
+                        self.consecutive_errors += 1;
+                        error!(
+                            consecutive_errors = self.consecutive_errors,
+                            "Pubsub service backend error"
+                        );
+                        if self.consecutive_errors >= self.handle.max_retries {
+                            error!(
+                                "Too many consecutive backend failures ({}), shutting down",
+                                self.consecutive_errors
+                            );
+                            break Err(TransportErrorKind::backend_gone())
+                        }
                         if let Err(e) = self.reconnect_with_retries().await {
                             break Err(e)
                         }
