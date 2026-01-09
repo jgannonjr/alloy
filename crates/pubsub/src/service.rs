@@ -1,7 +1,7 @@
 use crate::{
     handle::ConnectionHandle,
     ix::PubSubInstruction,
-    managers::{InFlight, RequestManager, SubscriptionManager},
+    managers::{InFlight, RequestManager, RequestOutcome, SubscriptionManager},
     PubSubConnect, PubSubFrontend, RawSubscription,
 };
 use alloy_json_rpc::{Id, PubSubItem, Request, Response, ResponsePayload, SubId};
@@ -159,8 +159,18 @@ impl<T: PubSubConnect> PubSubService<T> {
     fn handle_item(&mut self, item: PubSubItem) -> TransportResult<()> {
         match item {
             PubSubItem::Response(resp) => match self.in_flights.handle_response(resp) {
-                Some((server_id, in_flight)) => self.handle_sub_response(in_flight, server_id),
-                None => Ok(()),
+                Some(RequestOutcome::SubscriptionSuccess(server_id, in_flight)) => {
+                    self.handle_sub_response(in_flight, server_id)
+                }
+                Some(RequestOutcome::SubscriptionFailed(local_id)) => {
+                    error!(
+                        %local_id,
+                        "Subscription failed during (re)establishment, removing subscription"
+                    );
+                    self.subs.remove_sub(local_id);
+                    Ok(())
+                }
+                Some(RequestOutcome::NonSubscription) | None => Ok(()),
             },
             PubSubItem::Notification(notification) => {
                 self.subs.notify(notification);
@@ -198,7 +208,14 @@ impl<T: PubSubConnect> PubSubService<T> {
         let interval = self.handle.retry_interval;
         loop {
             match self.reconnect().await {
-                Ok(()) => break Ok(()),
+                Ok(()) => {
+                    info!(
+                        subscriptions = self.subs.len(),
+                        pending_requests = self.in_flights.len(),
+                        "Successfully reconnected pubsub backend"
+                    );
+                    break Ok(());
+                }
                 Err(e) => {
                     retry_count += 1;
                     if retry_count >= max_retries {

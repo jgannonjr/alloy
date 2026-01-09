@@ -92,6 +92,13 @@ impl SubscriptionManager {
             if let Some(sub) = self.local_to_sub.get_by_left(&local_id) {
                 sub.notify(notification.result);
             }
+        } else {
+            debug!(
+                server_id = ?notification.subscription,
+                active_subscriptions = self.local_to_sub.len(),
+                known_server_ids = self.local_to_server.len(),
+                "Notification dropped: unknown server subscription ID"
+            );
         }
     }
 

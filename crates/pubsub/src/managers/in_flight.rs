@@ -1,7 +1,19 @@
 use alloy_json_rpc::{Response, ResponsePayload, SerializedRequest, SubId};
+use alloy_primitives::B256;
 use alloy_transport::{TransportError, TransportResult};
 use std::fmt;
 use tokio::sync::oneshot;
+
+/// The outcome of fulfilling an in-flight request.
+#[derive(Debug)]
+pub enum RequestOutcome {
+    /// Not a subscription request. Response was sent to the original caller.
+    NonSubscription,
+    /// Subscription request succeeded. Contains the server ID and in-flight for registration.
+    SubscriptionSuccess(SubId, InFlight),
+    /// Subscription request failed. Contains the local ID for cleanup.
+    SubscriptionFailed(B256),
+}
 
 /// An in-flight JSON-RPC request.
 ///
@@ -16,6 +28,9 @@ pub struct InFlight {
 
     /// The channel to send the response on.
     pub tx: oneshot::Sender<TransportResult<Response>>,
+
+    /// Local ID for subscription requests, computed from params hash.
+    pub local_id: B256,
 }
 
 impl fmt::Debug for InFlight {
@@ -35,8 +50,9 @@ impl InFlight {
         channel_size: usize,
     ) -> (Self, oneshot::Receiver<TransportResult<Response>>) {
         let (tx, rx) = oneshot::channel();
+        let local_id = request.params_hash();
 
-        (Self { request, channel_size, tx }, rx)
+        (Self { request, channel_size, tx, local_id }, rx)
     }
 
     /// Check if the request is a subscription.
@@ -51,24 +67,25 @@ impl InFlight {
         &self.request
     }
 
-    /// Fulfill the request with a response. This consumes the in-flight
-    /// request. If the request is a subscription and the response is not an
-    /// error, the subscription ID and the in-flight request are returned.
-    pub fn fulfill(self, resp: Response) -> Option<(SubId, Self)> {
+    /// Fulfill the request with a response. This consumes the in-flight request.
+    pub fn fulfill(self, resp: Response) -> RequestOutcome {
         if self.is_subscription() {
+            let local_id = self.local_id;
             if let ResponsePayload::Success(val) = resp.payload {
                 let sub_id: serde_json::Result<SubId> = serde_json::from_str(val.get());
                 return match sub_id {
-                    Ok(alias) => Some((alias, self)),
+                    Ok(alias) => RequestOutcome::SubscriptionSuccess(alias, self),
                     Err(e) => {
                         let _ = self.tx.send(Err(TransportError::deser_err(e, val.get())));
-                        None
+                        RequestOutcome::SubscriptionFailed(local_id)
                     }
                 };
             }
+            let _ = self.tx.send(Ok(resp));
+            return RequestOutcome::SubscriptionFailed(local_id);
         }
 
         let _ = self.tx.send(Ok(resp));
-        None
+        RequestOutcome::NonSubscription
     }
 }

@@ -1,5 +1,5 @@
-use crate::managers::InFlight;
-use alloy_json_rpc::{Id, Response, SubId};
+use crate::managers::{InFlight, RequestOutcome};
+use alloy_json_rpc::{Id, Response};
 use alloy_primitives::map::HashMap;
 
 /// Manages in-flight requests.
@@ -26,13 +26,8 @@ impl RequestManager {
 
     /// Handle a response by sending the payload to the waiter.
     ///
-    /// If the request created a new subscription, this function returns the
-    /// subscription ID and the in-flight request for conversion to an
-    /// `ActiveSubscription`.
-    pub(crate) fn handle_response(&mut self, resp: Response) -> Option<(SubId, InFlight)> {
-        if let Some(in_flight) = self.reqs.remove(&resp.id) {
-            return in_flight.fulfill(resp);
-        }
-        None
+    /// Returns `None` if the response ID doesn't match any in-flight request.
+    pub(crate) fn handle_response(&mut self, resp: Response) -> Option<RequestOutcome> {
+        self.reqs.remove(&resp.id).map(|in_flight| in_flight.fulfill(resp))
     }
 }

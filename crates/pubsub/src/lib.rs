@@ -22,7 +22,7 @@ mod handle;
 pub use handle::{ConnectionHandle, ConnectionInterface};
 
 mod managers;
-pub use managers::InFlight;
+pub use managers::{InFlight, RequestOutcome};
 
 mod service;
 
